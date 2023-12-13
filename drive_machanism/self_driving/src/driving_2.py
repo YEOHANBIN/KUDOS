@@ -1,0 +1,152 @@
+import cv2
+import numpy as np
+import rospy
+from cv_bridge import CvBridge
+from sensor_msgs.msg import Image, CompressedImage
+from std_msgs.msg import Float64, Int64, Bool
+from geometry_msgs.msg import Twist
+
+class lane_detect:
+    def __init__(self):
+        rospy.init_node('lane_detection')
+        self.cmd_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
+        self.status_pub = rospy.Publisher('status', Int64, queue_size=10)
+        rospy.Subscriber("/usb_cam/image_raw", Image, self.image_CB)
+        
+        self.bridge = CvBridge()
+        self.rate = rospy.Rate(100)
+        
+        self.cmd_msg = Twist()
+        self.status_msg = Int64()
+        
+        self.left_top = (280, 220)
+        self.left_bottom = (200, 300)
+        self.right_bottom = (400, 300)
+        self.right_top = (320, 220)
+        self.src_points = np.float32([self.left_top,self.left_bottom,self.right_bottom,self.right_top])
+        self.dst_points = np.float32([(160,0),(160,480),(480,480),(480,0)])
+        
+    def image_CB(self,data):
+        try:
+            frame = self.bridge.imgmsg_to_cv2(data,desired_encoding="bgr8")
+            height, width = frame.shape[:2]
+            bird_view = self.bird_eye_view(frame, height, width)
+            self.find_lanes(bird_view)
+
+            cv2.imshow("OG_frame",frame)
+            cv2.imshow('bird_view',bird_view)
+            #self.status_pub.publish(self.status_msg.data)
+            key = cv2.waitKey(1)
+            if key == ord('q'):
+                rospy.signal_shutdown("User requested shutdown")
+        except Exception as e:
+            print("Error:", e)
+
+    def histogram(self,frame):
+        histogram_left = np.sum(frame[frame.shape[0]//2:,:frame.shape[1]//2], axis=0)
+        histogram_right = np.sum(frame[frame.shape[0]//2:,frame.shape[1]//2:], axis=0)
+        
+        left_x_base = np.argmax(histogram_left)
+        right_x_base = np.argmax(histogram_right)+frame.shape[1]//2
+        
+        return left_x_base,right_x_base
+    
+    def bird_eye_view(self,frame,height,width):
+        M = cv2.getPerspectiveTransform(self.src_points, self.dst_points)
+        warp_frame = cv2.warpPerspective(frame,M,(width,height))
+        
+        return warp_frame
+    
+    def find_lanes(self,image):
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, threshold1=50, threshold2=150)
+
+        height, width = edges.shape[:2]
+        roi_vertices = [(0,380),(0,260),(width,260),(width,380)]
+        mask = np.zeros_like(edges)
+        cv2.fillPoly(mask, np.array([roi_vertices], np.int32), 255)
+        masked_edges = cv2.bitwise_and(edges, mask)
+
+        lines = cv2.HoughLinesP(masked_edges, rho=1, theta=np.pi/180, threshold=50, minLineLength=50, maxLineGap=100)
+
+        data = []
+        steer_status = ""
+        line_image = np.zeros_like(image)
+        #slope_degree = 0
+        max_stack = 10
+
+        if lines is not None:
+            print("line found")
+            slope_degree, s_stack, L_stack, R_stack = 0, 0, 0, 0
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                cv2.line(line_image, (x1, y1), (x2, y2), (0, 255, 0), thickness=2)
+
+                if x2 - x1 != 0:
+                    slope = (y2-y1) / (x2-x1)
+                    slope_degree = np.arctan(slope)*180/np.pi
+
+                if abs(slope_degree) > 60:
+                    #s_stack += 1
+                    self.status_msg = 0
+                    self.cmd_msg.linear.x = 0.3
+                    self.cmd_msg.linear.y = 0.0
+                    self.cmd_msg.linear.z = 0.0
+                    self.cmd_msg.angular.x = 0.0
+                    self.cmd_msg.angular.y = 0.0
+                    self.cmd_msg.angular.z = 0.0
+                    steer_status = "GO_straight"
+                else:
+                    if slope_degree > 0:
+                        #R_stack += 1
+                        steer_status = "Turn_Left"
+                        self.status_msg = 1
+                        self.cmd_msg.linear.x = 0.0
+                        self.cmd_msg.linear.y = 0.0
+                        self.cmd_msg.linear.z = 0.0
+                        self.cmd_msg.angular.x = 0.0
+                        self.cmd_msg.angular.y = 0.0
+                        self.cmd_msg.angular.z = 0.15
+                    else:
+                        #L_stack += 1
+                        steer_status = "Turn_Right"
+                        self.status_msg = 2
+                        self.cmd_msg.linear.x = 0.0
+                        self.cmd_msg.linear.y = 0.0
+                        self.cmd_msg.linear.z = 0.0
+                        self.cmd_msg.angular.x = 0.0
+                        self.cmd_msg.angular.y = 0.0
+                        self.cmd_msg.angular.z = -0.15
+
+                #if s_stack > max_stack:
+                #    steer_status = "GO_straight"
+                #    self.status_msg = 0
+                #    s_stack = 0
+                #if R_stack > max_stack:
+                #    steer_status = "Turn_Right"
+                #    self.status_msg = 1
+                #    R_stack = 0
+                #if L_stack > max_stack:
+                #    steer_status = "Turn_Left"
+                #    self.status_msg = 2
+                #    L_stack = 0
+
+        else:
+            print("line not found")
+        #print("steer_status",self.steer_msg.linear.x)
+        print("steer_status",steer_status)
+        #print("degree",slope_degree)
+        self.cmd_pub.publish(self.cmd_msg)
+        self.status_pub.publish(self.status_msg)
+        self.rate.sleep()
+		#원본 이미지와 직선 이미지 합치기
+        result = cv2.addWeighted(image,0.8,line_image,1,0)
+        cv2.imshow("Hough_lane",result)
+		
+def main():
+	start = lane_detect()
+	rospy.spin()
+	cv2.destroyAllWindows() 
+
+if __name__=="__main__":
+	main()
