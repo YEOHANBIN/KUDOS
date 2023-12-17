@@ -1,7 +1,7 @@
 # kudos_activity
 kudos 12th activity(2022-2023)
 
-Ubuntu 18.04 & ROS melodic
+Ubuntu 18.04 & ROS melodic<br/>
 Ubuntu 20.04 & ROS noetic
 
 - ROS tutorial
