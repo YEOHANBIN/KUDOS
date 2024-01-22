@@ -1,5 +1,6 @@
-# kudos_activity
-kudos 12th activity(2022-2023)
+# KUDOS
+KUDOS 12th activity(2022-2023)
+About a Defense Robot
 
 ## Stack
 Ubuntu 18.04 & ROS melodic<br/>
